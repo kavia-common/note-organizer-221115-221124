@@ -1,41 +1,27 @@
+from typing import List, Optional, Dict
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
-from uuid import uuid4
-import json
-from pathlib import Path
 
 APP_TITLE = "Notes Organizer Backend"
-APP_DESC = "FastAPI backend providing CRUD operations for notes"
+APP_DESC = "FastAPI backend providing CRUD operations for notes (in-memory store)"
 APP_VERSION = "1.0.0"
 
-app = FastAPI(title=APP_TITLE, description=APP_DESC, version=APP_VERSION,
-              openapi_tags=[
-                  {"name": "Health", "description": "Health check endpoint"},
-                  {"name": "Notes", "description": "CRUD operations for notes"}
-              ])
+# Initialize FastAPI with OpenAPI tags
+app = FastAPI(
+    title=APP_TITLE,
+    description=APP_DESC,
+    version=APP_VERSION,
+    openapi_tags=[
+        {"name": "Health", "description": "Health check endpoint"},
+        {"name": "Notes", "description": "CRUD operations for notes (in-memory)"},
+    ],
+)
 
-# Simple file storage (JSON)
-DATA_DIR = Path(__file__).parent / "data"
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DATA_FILE = DATA_DIR / "notes.json"
-
-def _load_notes() -> List[dict]:
-    if not DATA_FILE.exists():
-        return []
-    try:
-        with DATA_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                return data
-            return []
-    except Exception:
-        return []
-
-def _save_notes(notes: List[dict]) -> None:
-    with DATA_FILE.open("w", encoding="utf-8") as f:
-        json.dump(notes, f, indent=2, ensure_ascii=False)
+# In-memory storage with incremental IDs
+_notes_store: Dict[int, Dict] = {}
+_next_id: int = 1
 
 
 class NoteBase(BaseModel):
@@ -59,19 +45,15 @@ class NoteUpdate(BaseModel):
 
 class Note(NoteBase):
     """Note response model."""
-    id: str = Field(..., description="Unique identifier for the note")
+    id: int = Field(..., description="Unique incremental identifier for the note")
 
 
-# Enable CORS for frontend
-origins = [
-    "http://localhost:3000",
-    "https://localhost:3000",
-]
+# Enable CORS for frontend - strict to React dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -82,51 +64,76 @@ def health():
     return {"status": "ok", "service": APP_TITLE, "version": APP_VERSION}
 
 # PUBLIC_INTERFACE
-@app.get("/notes", response_model=List[Note], tags=["Notes"], summary="List notes", description="Returns the list of all notes.")
-def list_notes():
-    """List all notes."""
-    return _load_notes()
+@app.get(
+    "/notes",
+    response_model=List[Note],
+    tags=["Notes"],
+    summary="List notes",
+    description="Returns the list of all notes from the in-memory store.",
+)
+def list_notes() -> List[Note]:
+    """List all notes from the in-memory store."""
+    return list(_notes_store.values())
 
 # PUBLIC_INTERFACE
-@app.post("/notes", response_model=Note, tags=["Notes"], summary="Create note", description="Create a new note with title, content, and optional tags.", status_code=201)
-def create_note(payload: NoteCreate):
-    """Create a new note."""
-    notes = _load_notes()
-    new_note = {
-        "id": str(uuid4()),
+@app.post(
+    "/notes",
+    response_model=Note,
+    tags=["Notes"],
+    summary="Create note",
+    description="Create a new note with title, content, and optional tags in the in-memory store.",
+    status_code=201,
+)
+def create_note(payload: NoteCreate) -> Note:
+    """Create a new note in the in-memory store."""
+    global _next_id
+    note = {
+        "id": _next_id,
         "title": payload.title,
         "content": payload.content,
         "tags": payload.tags or [],
     }
-    notes.insert(0, new_note)
-    _save_notes(notes)
-    return new_note
+    _notes_store[_next_id] = note
+    _next_id += 1
+    return note
 
 # PUBLIC_INTERFACE
-@app.put("/notes/{note_id}", response_model=Note, tags=["Notes"], summary="Update note", description="Update an existing note by ID.")
-def update_note(note_id: str, payload: NoteUpdate):
-    """Update an existing note by ID."""
-    notes = _load_notes()
-    for idx, n in enumerate(notes):
-        if n.get("id") == note_id:
-            if payload.title is not None:
-                n["title"] = payload.title
-            if payload.content is not None:
-                n["content"] = payload.content
-            if payload.tags is not None:
-                n["tags"] = payload.tags
-            notes[idx] = n
-            _save_notes(notes)
-            return n
-    raise HTTPException(status_code=404, detail="Note not found")
-
-# PUBLIC_INTERFACE
-@app.delete("/notes/{note_id}", tags=["Notes"], summary="Delete note", description="Delete an existing note by ID.")
-def delete_note(note_id: str):
-    """Delete an existing note by ID."""
-    notes = _load_notes()
-    filtered = [n for n in notes if n.get("id") != note_id]
-    if len(filtered) == len(notes):
+@app.put(
+    "/notes/{note_id}",
+    response_model=Note,
+    tags=["Notes"],
+    summary="Update note",
+    description="Update an existing note by ID in the in-memory store.",
+)
+def update_note(note_id: int, payload: NoteUpdate) -> Note:
+    """Update an existing note by ID in the in-memory store."""
+    if note_id not in _notes_store:
         raise HTTPException(status_code=404, detail="Note not found")
-    _save_notes(filtered)
+
+    note = _notes_store[note_id].copy()
+    if payload.title is not None:
+        note["title"] = payload.title
+    if payload.content is not None:
+        note["content"] = payload.content
+    if payload.tags is not None:
+        note["tags"] = payload.tags
+
+    _notes_store[note_id] = note
+    return note
+
+# PUBLIC_INTERFACE
+@app.delete(
+    "/notes/{note_id}",
+    tags=["Notes"],
+    summary="Delete note",
+    description="Delete an existing note by ID from the in-memory store.",
+)
+def delete_note(note_id: int):
+    """Delete an existing note by ID from the in-memory store."""
+    if note_id not in _notes_store:
+        raise HTTPException(status_code=404, detail="Note not found")
+    del _notes_store[note_id]
     return {"ok": True, "deleted": note_id}
+
+# Note on running:
+# Use: uvicorn main:app --host 0.0.0.0 --port 3001 --reload
